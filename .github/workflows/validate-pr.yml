@@ -1,0 +1,135 @@
+name: Validate Pull Request Description
+
+# Supports two usage modes:
+#
+# 1. Required Workflow (GitHub Enterprise / Rulesets):
+#    Add this workflow in Org Settings → Rulesets → Required Workflows,
+#    pointing to diesellaptops/toolset-pr-validator/.github/workflows/validate-pr.yml@main
+#
+# 2. Reusable Workflow (any plan):
+#    Call from another repo's workflow with:
+#      uses: diesellaptops/toolset-pr-validator/.github/workflows/validate-pr.yml@<full-commit-sha>
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+  workflow_call:
+
+jobs:
+  validate-pr-description:
+    name: PR Description Validator
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+
+    steps:
+      - name: Validate PR body
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = context.payload.pull_request?.body
+              ?? (await github.rest.pulls.get({
+                   owner: context.repo.owner,
+                   repo: context.repo.repo,
+                   pull_number: context.payload.number,
+                 })).data.body
+              ?? '';
+
+            const errors = [];
+
+            // ── 1. Body must not be empty ──────────────────────────────────
+            if (!body.trim()) {
+              core.setFailed('PR description is empty. Please fill out the pull request template.');
+              return;
+            }
+
+            // ── 2. Summary must be filled in ──────────────────────────────
+            if (body.includes('<!-- One or two sentences describing the change -->')) {
+              errors.push('**Summary** — replace the placeholder comment with an actual description.');
+            }
+
+            // ── 3. Linked ticket placeholder must be removed ──────────────
+            if (body.includes('<!-- e.g. JIRA-123 or #456 -->')) {
+              errors.push('**Linked issue / ticket** — add a ticket/issue reference or remove the placeholder.');
+            }
+
+            // ── 4. If any critical-change box is checked, the test
+            //       coverage table must be filled in ──────────────────────
+            const criticalChecked = /- \[x\]/i.test(body);
+            if (criticalChecked) {
+              const tablePlaceholders = [
+                '<!-- e.g. Modifies auth token logic -->',
+                '<!-- e.g. Unit: expired token rejected',
+                '<!-- e.g. `tests/auth/test_tokens.py`',
+              ];
+              if (tablePlaceholders.some(p => body.includes(p))) {
+                errors.push(
+                  '**Required Test Coverage** — one or more critical changes are checked, ' +
+                  'but the test coverage table still contains placeholder values. ' +
+                  'Fill in all three columns for each identified risk.'
+                );
+              }
+            }
+
+            // ── 5. Deployment Notes must be filled in ─────────────────────
+            if (body.includes('<!-- Rollback plan, feature flags, deployment instructions -->')) {
+              errors.push(
+                '**Deployment Notes** — replace the placeholder with your rollback plan, ' +
+                'feature flags, or deployment instructions. If none apply, write "N/A".'
+              );
+            }
+
+            // ── Post or update bot comment, then pass/fail ─────────────────
+            const BOT_MARKER = '<!-- dl-pr-validator -->';
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request?.number ?? context.payload.number,
+            });
+
+            const existing = comments.find(
+              c => c.user.type === 'Bot' && c.body.includes(BOT_MARKER)
+            );
+
+            if (errors.length > 0) {
+              const message = [
+                BOT_MARKER,
+                '## PR Description Incomplete',
+                '',
+                'The following sections need attention before this PR can be approved:',
+                '',
+                ...errors.map(e => `- ${e}`),
+                '',
+                '_Update the PR description to resolve these issues. This check will re-run automatically._',
+              ].join('\n');
+
+              if (existing) {
+                await github.rest.issues.updateComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: existing.id,
+                  body: message,
+                });
+              } else {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.payload.pull_request?.number ?? context.payload.number,
+                  body: message,
+                });
+              }
+
+              core.setFailed(`PR description has ${errors.length} incomplete section(s). See the PR comment for details.`);
+
+            } else {
+              // Validation passed — remove any previous failure comment
+              if (existing) {
+                await github.rest.issues.deleteComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: existing.id,
+                });
+              }
+              core.info('PR description validation passed.');
+            }

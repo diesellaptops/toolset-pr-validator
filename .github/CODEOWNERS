@@ -1,0 +1,3 @@
+# Code owners for toolset-pr-validator.
+# Every change to the shared validator requests review from these owners (DevOps).
+* @bengilbert12 @slydiesel
